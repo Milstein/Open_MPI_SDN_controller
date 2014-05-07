@@ -23,6 +23,32 @@ def is_host(name):
 def is_datapath(name):
 	return name.find(":") > 0
 
+dpid_name_dict = {}
+dpid_name_dict["96-d0-db-91-0a-44"] = "switch-01"
+dpid_name_dict["3e-25-98-57-0a-4e"] = "switch-02"
+dpid_name_dict["4e-5d-91-a4-26-4d"] = "switch-03"
+dpid_name_dict["e2-94-27-d5-ef-4e"] = "switch-04"
+dpid_name_dict["2e-7a-18-38-8c-49"] = "switch-05"
+dpid_name_dict["66-5d-a4-6c-ac-41"] = "switch-06"
+dpid_name_dict["2a-db-19-bc-94-4a"] = "host-01"
+dpid_name_dict["7e-1f-d6-e4-84-4e"] = "host-02"
+dpid_name_dict["ee-14-c4-6a-d3-4f"] = "host-03"
+dpid_name_dict["8e-23-ea-7a-73-48"] = "host-04"
+dpid_name_dict["52-84-05-47-56-4e"] = "host-05"
+dpid_name_dict["8a-68-d2-8b-e6-41"] = "host-06"
+dpid_name_dict["ce-b8-5c-71-5e-4f"] = "host-07"
+dpid_name_dict["4a-84-54-fd-db-43"] = "host-08"
+dpid_name_dict["6a-59-d5-d4-92-44"] = "host-09"
+dpid_name_dict["fe-92-3d-be-8c-47"] = "host-10"
+dpid_name_dict["1a-ab-10-e1-c8-47"] = "host-11"
+dpid_name_dict["fe-98-29-28-fa-4a"] = "host-12"
+dpid_name_dict["9a-29-05-08-c0-47"] = "host-13"
+dpid_name_dict["9a-f2-e1-da-9e-46"] = "host-14"
+dpid_name_dict["8e-6c-82-fe-89-48"] = "host-15"
+dpid_name_dict["6a-35-ac-ba-48-46"] = "host-16"
+def dpid_to_switch_name(name):
+	return dpid_name_dict[name]
+
 class MyComponent(object):
 
 	def __init__(self):
@@ -32,13 +58,13 @@ class MyComponent(object):
 		#self._switch_list = []
 		self._proc_num = None
 		self._host_list = {}
+		self._datapath_list = {}
 
 		self._topo_graph = Graph()
 		self._conn_graph = Graph()
 		self._reduce_plan = {}
 
 		self._host_host_path = {}  # shortest path from host to host
-		self._dp_connections = {}  # connection of datapath for send the rule
 
 		self._mac_to_port = {}
 
@@ -98,6 +124,11 @@ class MyComponent(object):
 			# after get all host data, calculate reduction plan and send back
 			print "Creating connection graph"
 			self._construct_connected_graph()  # result is in self._conn_graph
+
+			# calculate root value
+			for dpid in self._datapath_list:
+				root_value = self._topo_graph.get_root_value(dpid_to_str(dpid))
+				self._datapath_list[dpid].root_value = root_value
 
 			# create binomial tree and plan
 			print "Creating binomial tree for reduce to each rank"
@@ -163,7 +194,13 @@ class MyComponent(object):
 
 		dpid = event.connection.dpid
 
-		self._dp_connections[dpid_to_str(dpid)] = event.connection
+		if dpid not in self._datapath_list:
+			new_datapath = NetworkDatapath()
+			new_datapath.dpid = dpid
+			self._datapath_list[dpid] = new_datapath
+
+		self._datapath_list[dpid].connection = event.connection
+
 		self._install_flow_detect_host_topology(event.connection)
 		self._install_loop_terminate_flow(event.connection)
 
@@ -222,10 +259,10 @@ class MyComponent(object):
 			self._host_host_path[ip_src] = {}
 			for host in self._host_host_path:
 				if host != ip_src:
-					self._host_host_path[ip_src][host] = self._topo_graph.shortest_path(ip_src, host)
+					self._host_host_path[ip_src][host] = self._topo_graph.k_shortest_paths(ip_src, host, 1)[0]
 					self._install_flow_shortest_path(ip_src, host)
 					if ip_src not in self._host_host_path[host]:
-						self._host_host_path[host][ip_src] = self._topo_graph.shortest_path(host, ip_src)
+						self._host_host_path[host][ip_src] = self._topo_graph.k_shortest_paths(host, ip_src, 1)[0]
 						self._install_flow_shortest_path(host, ip_src)
 
 			return
@@ -279,7 +316,6 @@ class MyComponent(object):
 			event.connection.send(packet_out)
 
 			# add flow mod
-			print "install flow"
 			match = of.ofp_match()
 			#match.dl_type = pkt.ethernet.IP_TYPE
 			#match.in_port = in_port
@@ -457,7 +493,7 @@ class MyComponent(object):
 						#	msg.actions.append(of.ofp_action_dl_addr.set_dst(dl_dst))
 						msg.actions.append(of.ofp_action_output(port = out_port))
 
-				self._dp_connections[v].send(msg)
+				self._datapath_list[str_to_dpid(v)].connection.send(msg)
 
 	def _install_flow_reduce_path(self, reduce_level, reduce_root):
 		hex_root = hex(24)[2:].zfill(4)
@@ -492,7 +528,7 @@ class MyComponent(object):
 			msg.match = match
 			msg.actions.append(of.ofp_action_output(port = out_port))
 
-			self._dp_connections[dp].send(msg)
+			self._datapath_list[str_to_dpid(dp)].connection.send(msg)
 
 			# special match that check source MAC address
 			"""
@@ -511,7 +547,7 @@ class MyComponent(object):
 			msg2.actions.append(of.ofp_action_nw_addr.set_src(IPAddr(src_host)))
 			msg2.actions.append(of.ofp_action_output(port = out_port))
 
-			self._dp_connections[dp].send(msg2)
+			self._datapath_list[str_to_dpid(dp)].connection.send(msg)
 			"""
 
 	def _install_flow_detect_host_topology(self, connection):
@@ -596,9 +632,11 @@ class MyComponent(object):
 			tree = create_binomial_tree(TreeNode(root), vertex_num, conn_graph, added_list)
 			binomial_t_of_root[root] = tree
 
+			"""
 			if str(self._host_name_to_rank(root)) == "0":
 				print "Binomail tree of root at " + root + ":"
 				dump_binomail_tree(tree)
+			"""
 
 			def create_reduce_plan_and_remove_leaf(root_node, level, plan):
 				if root_node.is_leaf():
@@ -690,6 +728,26 @@ class Graph(object):
 			return 0;
 		return float("inf")
 
+	def get_root_value(self, node):
+		adj_level = {}
+		adj_level[node] = 0
+
+		node_list = [node]
+
+		while len(node_list) > 0:
+			n = node_list.pop(0)
+			for adj_n in self._adj_matrix[n]:
+				if adj_n not in adj_level:
+					node_list.append(adj_n)
+					adj_level[adj_n] = adj_level[n] + 1
+
+		host_min_dist = float("inf")
+		for n in self._adj_matrix:
+			if is_host(n) and host_min_dist > adj_level[n]:
+				host_min_dist = adj_level[n]
+
+		return host_min_dist
+
 	def minimum_host_spanning_tree(self, dump = False):
 		mst = self.spanning_tree()
 		
@@ -741,71 +799,100 @@ class Graph(object):
 
 		return st
 
-	def shortest_path(self, from_node, to_node):
+	def k_shortest_paths(self, from_node, to_node, k):
+
 		from_node = str(from_node)
 		to_node = str(to_node)
 
-		distance = {}
-		previous = {}
-		outport = {}
-		inport = {}
-		for node in self._adj_matrix:
-			distance[node] = float("inf")
-			previous[node] = None
-			outport[node] = None
-			inport[node] = None
-		distance[from_node] = 0
-		# TODO: use heap
-		"""node_heap = []
-		for node in self._adj_matrix:
-			if node == from_node:
-				heappush(node_heap, (node, 0.0))
-			else:
-				heappush(node_heap, (node, float("inf")))
-		"""
+		def shortest_path(from_node, to_node):
+			distance = {}
+			previous = {}
+			outport = {}
+			inport = {}
+			for node in self._adj_matrix:
+				distance[node] = float("inf")
+				previous[node] = None
+				outport[node] = None
+				inport[node] = None
+			distance[from_node] = 0
+			# TODO: use heap
+			"""node_heap = []
+			for node in self._adj_matrix:
+				if node == from_node:
+					heappush(node_heap, (node, 0.0))
+				else:
+					heappush(node_heap, (node, float("inf")))
+			"""
 
-		# run until ...
-		all_node = distance.copy()
-		while len(all_node) > 0:
-			curr = min(all_node, key=all_node.get)
+			# run until ...
+			all_node = distance.copy()
+			while len(all_node) > 0:
+				curr = min(all_node, key=all_node.get)
 
-			for adj_node in self._adj_matrix[curr]:
+				for adj_node in self._adj_matrix[curr]:
 
-				alt = distance[curr] + 1 #self._adj_matrix[curr][adj_node]
-				if alt < distance[adj_node]:
-					distance[adj_node] = all_node[adj_node] = alt
-					previous[adj_node] = curr
-					outport[adj_node] = self._adj_matrix[curr][adj_node]
-					inport[adj_node] = self._adj_matrix[adj_node][curr]
+					alt = distance[curr] + 1 #self._adj_matrix[curr][adj_node]
+					if alt < distance[adj_node]:
+						distance[adj_node] = all_node[adj_node] = alt
+						previous[adj_node] = curr
+						outport[adj_node] = self._adj_matrix[curr][adj_node]
+						inport[adj_node] = self._adj_matrix[adj_node][curr]
 
-			del all_node[curr]
+				del all_node[curr]
 
-		# create path
-		solution_path = []
-		out_ports = []
-		in_ports = []
-		curr = to_node
-		while previous[curr] != None:
-			solution_path.append(curr)
-			out_ports.append(outport[curr])
-			in_ports.append(inport[curr])
-			curr = previous[curr]
-		solution_path = solution_path[::-1]
-		out_ports = out_ports[::-1]
-		in_ports = in_ports[::-1]
+			# create path
+			solution_path = []
+			out_ports = []
+			in_ports = []
+			curr = to_node
+			while previous[curr] != None:
+				solution_path.append(curr)
+				out_ports.append(outport[curr])
+				in_ports.append(inport[curr])
+				curr = previous[curr]
+			solution_path = solution_path[::-1]
+			out_ports = out_ports[::-1]
+			in_ports = in_ports[::-1]
 
-		solution_path = solution_path[:-1]
-		out_ports = out_ports[1:]
-		in_ports = in_ports[:-1]		
+			solution_path = solution_path[:-1]
+			out_ports = out_ports[1:]
+			in_ports = in_ports[:-1]
 
-		"""
-		log.debug("Shortest path from [" + from_node + "] to [" + to_node + "] is")
-		log.debug(str(solution_path))
-		log.debug(str(out_ports))
-		log.debug(str(in_ports))
-		"""
+			return (solution_path, out_ports, in_ports, distance[to_node])
+			# end shortest path function
 
-		return (solution_path, out_ports, in_ports)
+		shortest_path_list = []
+
+		# find first shortest path
+		(path, outs, ins, shortest_path_distance) = shortest_path(from_node, to_node)
+		shortest_path_list.append( (path, outs, ins) )
+		first_path = list(path)
+
+		for n in range(len(first_path)-1):
+			from_n = first_path[n]
+			to_n = first_path[n+1]
+
+			tmp1 = self._adj_matrix[from_n][to_n]
+			tmp2 = self._adj_matrix[to_n][from_n]
+
+			# find another path
+			(path, outs, ins, dist) = shortest_path(from_n, to_n)
+			if dist == shortest_path_distance:
+				shortest_path_list.append( (path, outs, ins) )
+
+			self._adj_matrix[from_n][to_n] = tmp1
+			self._adj_matrix[to_n][from_n] = tmp2
+
+			if len(shortest_path_list) >= k:
+				break
+
+		print "Shortest path from [",from_node,"] to [",to_node,"] is"
+		for (path, outs, ins) in shortest_path_list:
+			print '[',','.join([dpid_to_switch_name(x) for x in path]),']'
+			#print str(outs)
+			#print str(ins)
+
+		return shortest_path_list
 
 class TreeNode(object):
 	def __init__(self, name):
@@ -833,7 +920,8 @@ class NetworkHost():
 class NetworkDatapath(object):
 	def __init__(self):
 		self.dpid = ""
-		#self.
+		self.name = ""
+		self.root_value = float("inf")
 
 
 def launch():
