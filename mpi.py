@@ -14,6 +14,7 @@ import os
 import socket
 import struct
 import sys
+import random
 
 log = core.getLogger()
 
@@ -49,6 +50,7 @@ dpid_name_dict["6a-35-ac-ba-48-46"] = "host-16"
 def dpid_to_switch_name(name):
 	return dpid_name_dict[name]
 
+
 class MyComponent(object):
 
 	def __init__(self):
@@ -69,6 +71,9 @@ class MyComponent(object):
 		self._mac_to_port = {}
 
 		self._link_num = 0
+
+		# for construct binomial tree improve version
+		self._reduced_tree_node = {}
 
 		thread = Thread(target = self._handle_ConnectionFromHost)
 		thread.start()
@@ -122,17 +127,54 @@ class MyComponent(object):
 			s.close()
 
 			# after get all host data, calculate reduction plan and send back
-			print "Creating connection graph"
+			#print "Creating connection graph"
 			self._construct_connected_graph()  # result is in self._conn_graph
 
 			# calculate root value
+			max_root_val = -1
 			for dpid in self._datapath_list:
 				root_value = self._topo_graph.get_root_value(dpid_to_str(dpid))
 				self._datapath_list[dpid].root_value = root_value
+				if root_value > max_root_val:
+					max_root_val = root_value
+
+			# FIXME: hard-code
+			"""
+			for dpid in self._datapath_list:
+				dp = 
+				self.send_parent = {}
+				# switch 01
+				if dpid == str_to_dpid("96-d0-db-91-0a-44"):
+					pass
+				# switch 02
+				elif dpid == str_to_dpid("3e-25-98-57-0a-4e"):
+					pass
+				# switch 03
+				elif dpid == str_to_dpid("4e-5d-91-a4-26-4d"):
+					self._datapath_list[dpid].send_parent["e2-94-27-d5-ef-4e"] = 
+					self._datapath_list[dpid].send_parent["2e-7a-18-38-8c-49"] = 
+					self._datapath_list[dpid].send_parent["66-5d-a4-6c-ac-41"] = 
+				# switch 04
+				elif dpid == str_to_dpid("e2-94-27-d5-ef-4e"):
+					self._datapath_list[dpid].send_parent["4e-5d-91-a4-26-4d"] = 
+					self._datapath_list[dpid].send_parent["2e-7a-18-38-8c-49"] = 
+					self._datapath_list[dpid].send_parent["66-5d-a4-6c-ac-41"] = 
+				# switch 05
+				elif dpid == str_to_dpid("2e-7a-18-38-8c-49"):
+					self._datapath_list[dpid].send_parent["4e-5d-91-a4-26-4d"] = 
+					self._datapath_list[dpid].send_parent["e2-94-27-d5-ef-4e"] = 
+					self._datapath_list[dpid].send_parent["66-5d-a4-6c-ac-41"] = 
+				# switch 06
+				elif dpid == str_to_dpid("66-5d-a4-6c-ac-41"):
+					self._datapath_list[dpid].send_parent["4e-5d-91-a4-26-4d"] = 
+					self._datapath_list[dpid].send_parent["e2-94-27-d5-ef-4e"] = 
+					self._datapath_list[dpid].send_parent["2e-7a-18-38-8c-49"] = 
+			"""
 
 			# create binomial tree and plan
-			print "Creating binomial tree for reduce to each rank"
-			self._construct_binomial_tree_and_plan(dump = False)
+			#print "Creating binomial tree for reduce to each rank"
+			#self._construct_binomial_tree_and_plan(dump = False)
+			self._construct_binomial_tree_and_plan_improve(dump = False)
 
 			# TODO: close socket connection
 			for host in self._host_list:
@@ -253,17 +295,18 @@ class MyComponent(object):
 			new_host.adjacent_datapath = dpid_to_str(dpid)
 			self._host_list[ip_src] = new_host
 
-			log.info("link detected: " + ip_src + " -> " + dpid_to_str(dpid))
+			#print "link detected:",ip_src,"->",dpid_to_str(dpid))
 
 			# create shortest path and install flow for other packet
 			self._host_host_path[ip_src] = {}
 			for host in self._host_host_path:
 				if host != ip_src:
-					self._host_host_path[ip_src][host] = self._topo_graph.k_shortest_paths(ip_src, host, 1)[0]
-					self._install_flow_shortest_path(ip_src, host)
+					max_path = 4 # TODO: how to calculate this value
+					self._host_host_path[ip_src][host] = self._topo_graph.k_shortest_paths(ip_src, host, max_path)
+					#self._install_flow_shortest_path(ip_src, host)
 					if ip_src not in self._host_host_path[host]:
-						self._host_host_path[host][ip_src] = self._topo_graph.k_shortest_paths(host, ip_src, 1)[0]
-						self._install_flow_shortest_path(host, ip_src)
+						self._host_host_path[host][ip_src] = self._topo_graph.k_shortest_paths(host, ip_src, max_path)
+						#self._install_flow_shortest_path(host, ip_src)
 
 			return
 
@@ -581,11 +624,77 @@ class MyComponent(object):
 					pass
 				while dst_h not in self._host_host_path[src_h]:
 					pass
-				(path, out_ports, in_ports) = self._host_host_path[src_h][dst_h]
+				shortest_path_list = self._host_host_path[src_h][dst_h]
+				(path, out_ports, in_ports) = shortest_path_list[0]
 				# TODO: fix weight by adding congestion
 				weight = len(path) + 1
 				self._conn_graph.add_edge(src_h, dst_h, weight)
 				self._conn_graph.add_edge(dst_h, src_h, weight)
+
+	def _create_binomial_tree(self, root_node, vertex_num, conn_graph, added_list):
+		added_list[root_node._name] = 1
+
+		if vertex_num == 1:
+			return root_node
+		else:
+			v = vertex_num / 2
+			while v >= 1:
+				root_name = root_node._name
+				(min_node, min_weight) = conn_graph.get_shortest_link_from(root_name, added_list)
+				if min_node:
+					if min_node in self._reduced_tree_node:
+						min_node = self._reduced_tree_node[min_node]
+					else:
+						min_node = TreeNode(min_node)
+					# TODO: fix for non log2 tree
+					sub_tree = self._create_binomial_tree(min_node, v, conn_graph, added_list)
+					root_node.add_child(sub_tree)
+
+				v = v / 2 # update
+
+			return root_node
+
+	def _dump_binomail_tree(self, root_node):
+		# print root -> [child0, child1, ... childn]
+		node_str = ""
+		node_str += str(self._host_name_to_rank(root_node._name)) + " -> ["
+		for child in root_node._child:
+			node_str += str(self._host_name_to_rank(child._name)) + ","
+		node_str +=  "]"
+		print node_str
+
+		# recursive print
+		for child in root_node._child:
+			self._dump_binomail_tree(child)
+
+	def _create_reduce_plan(self, root_node):
+		def create_reduce_plan_and_remove_leaf(root_node, level, plan):
+			if root_node.is_leaf():
+				return None
+			else:
+				del_list = []
+				for c in range(root_node.get_child_num()):
+					if root_node._child[c].is_leaf():
+						plan.append((level,root_node._child[c]._name,root_node._name))
+						del_list.append(c)
+					else:
+						create_reduce_plan_and_remove_leaf(root_node._child[c], level, plan)
+				# reverse delete list
+				del_list = del_list[::-1]
+				for d in del_list:
+					del root_node._child[d]
+				
+		plan = []
+		level = 1
+		while root_node.get_child_num() > 0:
+			create_reduce_plan_and_remove_leaf(root_node, level, plan)
+			level += 1
+		print "root",root_node._name
+		if root_node._name == "10.0.0.21":
+			for (l,f,t) in plan:
+				print l,":",f,"to",t
+
+		return plan
 
 	def _construct_binomial_tree_and_plan(self, dump = False):
 		# rank 0, 1, 2, ..., n-1
@@ -596,73 +705,90 @@ class MyComponent(object):
 			conn_graph._adj_matrix = self._conn_graph._adj_matrix.copy()
 			conn_graph._vertex_count = self._conn_graph._vertex_count
 
-			def create_binomial_tree(root_node, vertex_num, conn_graph, added_list):
-				added_list[root_node._name] = 1
-
-				if vertex_num == 1:
-					return root_node
-				else:
-					v = vertex_num / 2
-					while v >= 1:
-						root_name = root_node._name
-						(min_node, min_weight) = conn_graph.get_shortest_link_from(root_name, added_list)
-						if min_node:
-							# TODO: fix for non log2 tree
-							sub_tree = create_binomial_tree(TreeNode(min_node), v, conn_graph, added_list)
-							root_node.add_child(sub_tree)
-
-						v = v / 2 # update
-
-					return root_node
-
-			def dump_binomail_tree(root_node):
-				# print root -> [child0, child1, ... childn]
-				node_str = ""
-				node_str += str(self._host_name_to_rank(root_node._name)) + " -> ["
-				for child in root_node._child:
-					node_str += str(self._host_name_to_rank(child._name)) + ","
-				node_str +=  "]"
-				print node_str
-
-				# recursive print
-				for child in root_node._child:
-					dump_binomail_tree(child)
-
 			added_list = {}
-			tree = create_binomial_tree(TreeNode(root), vertex_num, conn_graph, added_list)
+			tree = self._create_binomial_tree(TreeNode(root), vertex_num, conn_graph, added_list)
 			binomial_t_of_root[root] = tree
 
-			"""
-			if str(self._host_name_to_rank(root)) == "0":
+			if str(self._host_name_to_rank(root)) in ["0","2","4"]:
 				print "Binomail tree of root at " + root + ":"
-				dump_binomail_tree(tree)
-			"""
+				self._dump_binomail_tree(tree)
 
-			def create_reduce_plan_and_remove_leaf(root_node, level, plan):
-				if root_node.is_leaf():
-					return None
-				else:
-					del_list = []
-					for c in range(root_node.get_child_num()):
-						if root_node._child[c].is_leaf():
-							plan.append((level,root_node._child[c]._name,root_node._name))
-							del_list.append(c)
-						else:
-							create_reduce_plan_and_remove_leaf(root_node._child[c], level, plan)
-					# reverse delete list
-					del_list = del_list[::-1]
-					for d in del_list:
-						del root_node._child[d]
+			self._reduce_plan[root] = self._create_reduce_plan(tree)
 
-			def create_reduce_plan(root_node):
-				plan = []
-				level = 1
-				while root_node.get_child_num() > 0:
-					create_reduce_plan_and_remove_leaf(root_node, level, plan)
-					level += 1
-				return plan
+	def _construct_binomial_tree_and_plan_improve(self, dump = False):
+		# rank 0, 1, 2, ..., n-1
+		binomial_t_of_root = {}
+		for root in self._host_list:
 
-			self._reduce_plan[root] = create_reduce_plan(tree)
+			self._reduced_tree_node = {}
+			reduced_vertex = [] # list of TreeNode
+			reduced_vertex_name = set()
+			added_list = {}
+
+			for dpid in self._datapath_list:
+				dp = self._datapath_list[dpid]
+				if dp.root_value == 1:
+
+					dpid_str = dpid_to_str(dpid)
+					#print "dpid is",dpid_str
+					dp_host_list = [] # list of TreeNode
+					for adj in self._topo_graph._adj_matrix[dpid_str]:
+						if is_host(adj):
+							#print "adj is",adj
+							if adj == root:
+								dp_host_list = [TreeNode(adj)] + dp_host_list
+							else:
+								dp_host_list.append( TreeNode(adj) )
+
+					# TODO: remove shuffle
+					rest_list = dp_host_list[1:]
+					random.shuffle(rest_list)
+					dp_host_list[1:] = rest_list
+
+					# assume dp_host_list always power of 2, reduce in group
+					while len(dp_host_list) > 2:
+						list_size = len(dp_host_list)
+						for i in range(list_size/2):
+							child_node = dp_host_list.pop(list_size-1-i) #added_list[child_node._name] = 1
+							dp_host_list[i].add_child( child_node )
+
+					reduced_vertex.append( dp_host_list[0] )
+					reduced_vertex.append( dp_host_list[1] )
+					reduced_vertex_name.add( dp_host_list[0]._name )
+					reduced_vertex_name.add( dp_host_list[1]._name )
+
+			# create new connection graph
+			reduced_conn_graph = Graph()
+			adj_matrix = self._conn_graph._adj_matrix
+
+			#print "Node in reduced vertex"
+			for tree_node in reduced_vertex:
+				#print "\t",tree_node._name
+				reduced_conn_graph.add_vertex(tree_node._name)
+				self._reduced_tree_node[tree_node._name] = tree_node
+			
+				for n in adj_matrix[tree_node._name]:
+					if n in reduced_vertex_name:
+						reduced_conn_graph.add_vertex(n)
+						v1 = adj_matrix[tree_node._name][n]
+						reduced_conn_graph.add_edge(tree_node._name, n, v1)
+						v2 = adj_matrix[n][tree_node._name]
+						reduced_conn_graph.add_edge(n, tree_node._name, v2)
+
+			vertex_num = reduced_conn_graph.get_vertex_num()
+
+			if root in self._reduced_tree_node:
+				root_tree_node = self._reduced_tree_node[root]
+			else:
+				root_tree_node = TreeNode( root )
+			tree = self._create_binomial_tree(root_tree_node, vertex_num, reduced_conn_graph, added_list)
+			binomial_t_of_root[root] = tree
+
+			#if str(self._host_name_to_rank(root)) in ["0","2","4"]:
+			#print "Binomail tree of root at " + root + ":"
+			#self._dump_binomail_tree(tree)
+
+			self._reduce_plan[root] = self._create_reduce_plan(tree)
 
 	def _add_link_to_graph(self, src_dpid, dst_dpid, src_port, dst_port):
 		def cast_node_name(name):
@@ -729,6 +855,14 @@ class Graph(object):
 		return float("inf")
 
 	def get_root_value(self, node):
+		if node in ["2a-db-19-bc-94-4a", "7e-1f-d6-e4-84-4e", "ee-14-c4-6a-d3-4f",
+			"8e-23-ea-7a-73-48", "52-84-05-47-56-4e", "8a-68-d2-8b-e6-41",
+			"ce-b8-5c-71-5e-4f", "4a-84-54-fd-db-43", "6a-59-d5-d4-92-44",
+			"fe-92-3d-be-8c-47", "1a-ab-10-e1-c8-47", "fe-98-29-28-fa-4a",
+			"9a-29-05-08-c0-47", "9a-f2-e1-da-9e-46", "8e-6c-82-fe-89-48",
+			"6a-35-ac-ba-48-46"]:
+			return -1
+
 		adj_level = {}
 		adj_level[node] = 0
 
@@ -741,12 +875,10 @@ class Graph(object):
 					node_list.append(adj_n)
 					adj_level[adj_n] = adj_level[n] + 1
 
-		host_min_dist = float("inf")
-		for n in self._adj_matrix:
-			if is_host(n) and host_min_dist > adj_level[n]:
-				host_min_dist = adj_level[n]
+					if is_host(adj_n): 
+						return adj_level[adj_n]
 
-		return host_min_dist
+		return 0
 
 	def minimum_host_spanning_tree(self, dump = False):
 		mst = self.spanning_tree()
@@ -804,12 +936,12 @@ class Graph(object):
 		from_node = str(from_node)
 		to_node = str(to_node)
 
-		def shortest_path(from_node, to_node):
+		def shortest_path(from_node, to_node, adj_mat):
 			distance = {}
 			previous = {}
 			outport = {}
 			inport = {}
-			for node in self._adj_matrix:
+			for node in adj_mat:
 				distance[node] = float("inf")
 				previous[node] = None
 				outport[node] = None
@@ -817,7 +949,7 @@ class Graph(object):
 			distance[from_node] = 0
 			# TODO: use heap
 			"""node_heap = []
-			for node in self._adj_matrix:
+			for node in adj_mat:
 				if node == from_node:
 					heappush(node_heap, (node, 0.0))
 				else:
@@ -829,16 +961,19 @@ class Graph(object):
 			while len(all_node) > 0:
 				curr = min(all_node, key=all_node.get)
 
-				for adj_node in self._adj_matrix[curr]:
+				for adj_node in adj_mat[curr]:
 
-					alt = distance[curr] + 1 #self._adj_matrix[curr][adj_node]
+					alt = distance[curr] + 1 #adj_mat[curr][adj_node]
 					if alt < distance[adj_node]:
 						distance[adj_node] = all_node[adj_node] = alt
 						previous[adj_node] = curr
-						outport[adj_node] = self._adj_matrix[curr][adj_node]
-						inport[adj_node] = self._adj_matrix[adj_node][curr]
+						outport[adj_node] = adj_mat[curr][adj_node]
+						inport[adj_node] = adj_mat[adj_node][curr]
 
 				del all_node[curr]
+
+			if distance[to_node] == float("inf"):
+				return ([], [], [], float("inf"))
 
 			# create path
 			solution_path = []
@@ -864,33 +999,39 @@ class Graph(object):
 		shortest_path_list = []
 
 		# find first shortest path
-		(path, outs, ins, shortest_path_distance) = shortest_path(from_node, to_node)
+		(path, outs, ins, shortest_path_distance) = shortest_path(from_node, to_node, self._adj_matrix)
 		shortest_path_list.append( (path, outs, ins) )
 		first_path = list(path)
 
-		for n in range(len(first_path)-1):
-			from_n = first_path[n]
-			to_n = first_path[n+1]
+		for n in first_path:
 
-			tmp1 = self._adj_matrix[from_n][to_n]
-			tmp2 = self._adj_matrix[to_n][from_n]
+			# remove n from graph
+			new_adj_mat = {}
+			for h in self._adj_matrix:
+				if h == n:
+					continue
+				new_adj_mat[h] = {}
+				for m in self._adj_matrix[h]:
+					if m == n:
+						continue
+					new_adj_mat[h][m] = self._adj_matrix[h][m]
 
 			# find another path
-			(path, outs, ins, dist) = shortest_path(from_n, to_n)
+			(npath, nouts, nins, dist) = shortest_path(from_node, to_node, new_adj_mat)
 			if dist == shortest_path_distance:
-				shortest_path_list.append( (path, outs, ins) )
-
-			self._adj_matrix[from_n][to_n] = tmp1
-			self._adj_matrix[to_n][from_n] = tmp2
+				shortest_path_list.append( (npath, nouts, nins) )
 
 			if len(shortest_path_list) >= k:
 				break
 
-		print "Shortest path from [",from_node,"] to [",to_node,"] is"
-		for (path, outs, ins) in shortest_path_list:
-			print '[',','.join([dpid_to_switch_name(x) for x in path]),']'
-			#print str(outs)
-			#print str(ins)
+		"""
+		if len(shortest_path_list) > 1:
+			print "Shortest path from [",from_node,"] to [",to_node,"] is"
+			for (path, outs, ins) in shortest_path_list:
+				print '[',','.join([dpid_to_switch_name(x) for x in path]),']'
+				#print str(outs)
+				#print str(ins)
+		"""
 
 		return shortest_path_list
 
@@ -922,7 +1063,7 @@ class NetworkDatapath(object):
 		self.dpid = ""
 		self.name = ""
 		self.root_value = float("inf")
-
+		self.send_parent = {}
 
 def launch():
 	log.debug("SDN MPI component start")
